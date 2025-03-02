@@ -2,7 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "pip install -r requirements.txt && python -m playwright install chromium"
+    "buildCommand": "pip install -r requirements.txt && python -m playwright install chromium && chmod +x entrypoint.sh && chmod +x health_server.py"
   },
   "deploy": {
     "startCommand": "./entrypoint.sh",
@@ -10,7 +10,7 @@
     "restartPolicyMaxRetries": 5,
     "healthcheckPath": "/health",
     "healthcheckPort": 5000,
-    "healthcheckTimeout": 10,
-    "healthcheckInterval": 30
+    "healthcheckTimeout": 30,
+    "healthcheckInterval": 15
   }
 }
