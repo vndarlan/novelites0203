@@ -13,10 +13,19 @@ Base = declarative_base()
 
 # Função para obter a string de conexão do banco de dados
 def get_database_url():
+    # Verificar se estamos na fase de build
+    if os.environ.get('RAILWAY_BUILD_PHASE'):
+        logger.info("Fase de build detectada, usando SQLite temporário")
+        return 'sqlite:///./test_build.db'
+    
     # Verificar se estamos no Railway
     if os.environ.get('RAILWAY_ENVIRONMENT'):
         # No Railway, a variável DATABASE_URL estará disponível
         database_url = os.environ.get('DATABASE_URL')
+        
+        if not database_url:
+            logger.warning("DATABASE_URL não definida no Railway, usando SQLite")
+            return 'sqlite:///./site_agente.db'
         
         # O Railway usa postgres://, mas SQLAlchemy precisa de postgresql://
         if database_url and database_url.startswith('postgres://'):
@@ -34,26 +43,46 @@ def create_db_engine():
     database_url = get_database_url()
     logger.info(f"Criando engine com URL: {database_url}")
     
-    # Criar engine com opções adequadas para PostgreSQL
-    if database_url.startswith('postgresql'):
-        return create_engine(
-            database_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_timeout=30,
-            pool_recycle=1800,  # Reciclar conexões a cada 30 minutos
-            echo=False  # Definir como True para debug
-        )
-    else:
-        # SQLite para desenvolvimento local
-        return create_engine(
-            database_url,
-            connect_args={"check_same_thread": False},  # Necessário para SQLite
-            echo=False
-        )
+    try:
+        # Criar engine com opções adequadas para PostgreSQL
+        if database_url.startswith('postgresql'):
+            return create_engine(
+                database_url,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=1800,  # Reciclar conexões a cada 30 minutos
+                echo=False  # Definir como True para debug
+            )
+        else:
+            # SQLite para desenvolvimento local
+            return create_engine(
+                database_url,
+                connect_args={"check_same_thread": False},  # Necessário para SQLite
+                echo=False
+            )
+    except Exception as e:
+        logger.error(f"Erro ao criar engine: {str(e)}")
+        
+        # Fallback para SQLite em memória em caso de erro
+        if os.environ.get('RAILWAY_BUILD_PHASE'):
+            logger.warning("Usando SQLite em memória como fallback durante build")
+            return create_engine('sqlite:///:memory:', connect_args={"check_same_thread": False})
+        
+        # Relancar a exceção se não estiver na fase de build
+        raise
 
 # Engine global
-engine = create_db_engine()
+try:
+    engine = create_db_engine()
+except Exception as e:
+    logger.error(f"Erro ao criar engine do banco de dados: {e}")
+    # Em modo de build, criar um engine dummy para permitir que a construção continue
+    if os.environ.get('RAILWAY_BUILD_PHASE'):
+        logger.warning("Criando engine dummy para fase de build")
+        engine = create_engine('sqlite:///:memory:')
+    else:
+        raise
 
 # Fábrica de sessões
 SessionLocal = scoped_session(
@@ -75,6 +104,12 @@ def init_db():
         return True
     except Exception as e:
         logger.error(f"Erro ao inicializar banco de dados: {e}")
+        
+        # Não lançar exceção durante a fase de build
+        if os.environ.get('RAILWAY_BUILD_PHASE'):
+            logger.warning("Ignorando erro de inicialização durante build")
+            return False
+        
         raise
 
 # Contexto de sessão para uso com 'with'

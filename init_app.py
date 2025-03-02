@@ -1,7 +1,6 @@
 import os
 import sys
 import logging
-import json
 from typing import Dict
 
 # Configuração de logging
@@ -25,6 +24,11 @@ def init_directories():
 def init_database():
     """Inicializa o banco de dados"""
     try:
+        # Verificar se temos conexão com o banco de dados
+        if not os.environ.get('DATABASE_URL'):
+            logger.warning("Variável DATABASE_URL não encontrada. Pulando inicialização do banco de dados.")
+            return False
+            
         # Importar após criar diretórios
         from db.database import init_db
         
@@ -39,6 +43,13 @@ def init_database():
 def init_default_config():
     """Inicializa configurações padrão no banco de dados"""
     try:
+        # Verificar se a inicialização do banco de dados foi bem-sucedida
+        if not os.environ.get('DATABASE_URL'):
+            logger.warning("Variável DATABASE_URL não encontrada. Pulando configurações padrão.")
+            return False
+            
+        # Importações necessárias
+        import json
         from db.database import get_db_session
         from db.models import ApiKey
         
@@ -83,19 +94,30 @@ def main():
     """Função principal de inicialização"""
     logger.info("Iniciando processo de inicialização")
     
+    # Verificar o ambiente
+    is_railway = bool(os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RAILWAY_PUBLIC_DOMAIN'))
+    if is_railway:
+        logger.info("Ambiente Railway detectado")
+    else:
+        logger.info("Executando em ambiente local")
+    
     # Inicializar diretórios
     init_directories()
     
-    # Inicializar banco de dados
+    # Verificar se estamos apenas construindo a imagem
+    if os.environ.get('RAILWAY_BUILD_PHASE'):
+        logger.info("Fase de build detectada. Pulando inicialização do banco de dados.")
+        return
+    
+    # Inicializar banco de dados apenas se estivermos executando o aplicativo (não na fase de build)
     if not init_database():
-        logger.error("Falha na inicialização do banco de dados")
-        sys.exit(1)
+        logger.warning("Falha na inicialização do banco de dados, mas continuando...")
     
     # Inicializar configurações padrão
     if not init_default_config():
-        logger.warning("Falha na inicialização das configurações padrão")
+        logger.warning("Falha na inicialização das configurações padrão, mas continuando...")
     
-    logger.info("Inicialização concluída com sucesso")
+    logger.info("Inicialização concluída")
 
 if __name__ == "__main__":
     main()
