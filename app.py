@@ -28,15 +28,8 @@ try:
 except Exception as e:
     logger.error(f"Erro ao configurar Streamlit: {e}")
 
-# REMOVER este bloco para evitar conflito com o healthcheck já iniciado no entrypoint.sh
-# if os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('RAILWAY_PUBLIC_DOMAIN'):
-#     try:
-#         print("Ambiente Railway detectado, importando health_check")
-#         from utils.health_check import setup_healthcheck
-#         setup_healthcheck()
-#         print("Healthcheck configurado com sucesso")
-#     except Exception as e:
-#         print(f"Erro ao configurar healthcheck: {e}")
+# IMPORTANTE: bloco removido para evitar conflito com o healthcheck separado
+# Não tente inicializar o healthcheck aqui, pois agora ele é executado como processo separado
 
 # Importações internas
 try:

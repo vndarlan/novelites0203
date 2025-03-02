@@ -2,12 +2,15 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Instalar dependências do sistema necessárias para psycopg2 e Playwright
+# Instalar dependências do sistema necessárias
 RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
     wget \
     gnupg \
+    curl \
+    net-tools \
+    procps \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -23,8 +26,13 @@ RUN python -m playwright install chromium --with-deps
 # Copiar o resto do código
 COPY . .
 
-# Tornar o script de entrypoint executável
+# Tornar scripts executáveis
 RUN chmod +x entrypoint.sh
+RUN chmod +x health_check_server.py
+
+# Expor portas
+EXPOSE 8080
+EXPOSE 5000
 
 # Configurar entrypoint
 ENTRYPOINT ["./entrypoint.sh"]
