@@ -29,6 +29,11 @@ print('Servidor de healthcheck iniciado em http://0.0.0.0:5000')
 echo "Aguardando servidor de healthcheck iniciar..."
 sleep 5
 
-# Iniciar o Streamlit
+# Iniciar o Streamlit com tratamento de erros melhorado
 echo "Iniciando Streamlit na porta $PORT..."
-streamlit run app.py --server.port=$PORT --server.enableCORS=false --server.enableXsrfProtection=false
+streamlit run app.py --server.port=$PORT --server.enableCORS=false --server.enableXsrfProtection=false || {
+    echo "ERRO: Falha ao iniciar o servidor Streamlit"
+    echo "Verificando logs..."
+    tail -n 100 /tmp/streamlit_error.log 2>/dev/null || echo "Nenhum log de erro encontrado"
+    exit 1
+}
