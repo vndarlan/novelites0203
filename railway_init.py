@@ -32,25 +32,38 @@ def run_initialization():
     
     try:
         # Criar diretórios necessários
-        from init_app import init_directories
-        init_directories()
-        logger.info("Diretórios inicializados")
+        try:
+            from init_app import init_directories
+            init_directories()
+            logger.info("Diretórios inicializados")
+        except ImportError as e:
+            logger.warning(f"Não foi possível importar init_directories: {e}")
+            # Criar diretórios básicos manualmente
+            for directory in ['db', 'utils', 'static', 'static/screenshots']:
+                if not os.path.exists(directory):
+                    os.makedirs(directory)
+                    logger.info(f"Diretório criado: {directory}")
         
         # Verificar banco de dados
-        from utils.db_migration import run_migration
-        
-        logger.info("Iniciando verificação de banco de dados e migração...")
-        success = run_migration()
-        
-        if success:
-            logger.info("Banco de dados verificado e atualizado com sucesso")
-        else:
-            logger.warning("Problemas ao verificar/atualizar banco de dados")
+        try:
+            from utils.db_migration import run_migration
+            logger.info("Iniciando verificação de banco de dados e migração...")
+            success = run_migration()
+            
+            if success:
+                logger.info("Banco de dados verificado e atualizado com sucesso")
+            else:
+                logger.warning("Problemas ao verificar/atualizar banco de dados")
+        except ImportError as e:
+            logger.warning(f"Não foi possível importar run_migration: {e}")
         
         # Inicializar configurações padrão
-        from init_app import init_default_config
-        init_default_config()
-        logger.info("Configurações padrão inicializadas")
+        try:
+            from init_app import init_default_config
+            init_default_config()
+            logger.info("Configurações padrão inicializadas")
+        except ImportError as e:
+            logger.warning(f"Não foi possível importar init_default_config: {e}")
         
         # Configurar healthcheck para Railway
         if check_railway_environment():
@@ -60,7 +73,7 @@ def run_initialization():
                 setup_healthcheck()
                 logger.info("Healthcheck configurado com sucesso")
             except Exception as e:
-                logger.error(f"Erro ao configurar healthcheck: {e}")
+                logger.warning(f"Erro ao configurar healthcheck: {e}")
         
         # Configurar tarefa de manutenção
         try:
@@ -69,38 +82,27 @@ def run_initialization():
             schedule_maintenance()
             logger.info("Tarefa de manutenção configurada")
         except Exception as e:
-            logger.error(f"Erro ao configurar tarefa de manutenção: {e}")
+            logger.warning(f"Erro ao configurar tarefa de manutenção: {e}")
         
         # Verificar se o Playwright está instalado
         try:
             logger.info("Verificando instalação do Playwright")
             from playwright.async_api import async_playwright
             logger.info("Playwright importado com sucesso")
-            
-            # Verificar se o navegador está instalado
-            import subprocess
-            logger.info("Verificando instalação do navegador")
-            result = subprocess.run(["python", "-m", "playwright", "install", "chromium"], 
-                                   capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logger.info("Navegador Chromium instalado com sucesso")
-            else:
-                logger.warning(f"Problemas ao instalar Chromium: {result.stderr}")
         except Exception as e:
-            logger.error(f"Erro ao verificar Playwright: {e}")
+            logger.warning(f"Erro ao verificar Playwright: {e}")
         
-        # Verificar integração com Browser-use
-        try:
-            logger.info("Verificando integração com Browser-use")
-            from utils.browser_use_adapter import BrowserUseAdapter
-            adapter = BrowserUseAdapter()
-            if adapter.browser_use_available:
-                logger.info("Browser-use disponível e integrado")
-            else:
-                logger.info("Browser-use não disponível, usando implementação interna")
-        except Exception as e:
-            logger.error(f"Erro ao verificar integração com Browser-use: {e}")
+        # Verificar integração com Browser-use - DESABILITADO TEMPORARIAMENTE
+        # try:
+        #     logger.info("Verificando integração com Browser-use")
+        #     from utils.browser_use_adapter import BrowserUseAdapter
+        #     adapter = BrowserUseAdapter()
+        #     if adapter.browser_use_available:
+        #         logger.info("Browser-use disponível e integrado")
+        #     else:
+        #         logger.info("Browser-use não disponível, usando implementação interna")
+        # except Exception as e:
+        #     logger.error(f"Erro ao verificar integração com Browser-use: {e}")
         
         logger.info("Inicialização concluída com sucesso")
         return True
