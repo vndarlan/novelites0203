@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Instalar Playwright e o navegador Chromium
 RUN python -m playwright install chromium --with-deps
 
+# Criar diretórios necessários antes de copiar os arquivos
+RUN mkdir -p static/screenshots
+
 # Copiar o resto do código
 COPY . .
 
@@ -30,10 +33,6 @@ COPY . .
 RUN chmod +x entrypoint.sh
 RUN chmod +x health_check_server.py
 RUN [ -f health_server.py ] && chmod +x health_server.py || echo "health_server.py não encontrado"
-
-# Garantir que os diretórios necessários existam e tenham permissões
-RUN mkdir -p static/screenshots && \
-    chmod -R 755 static
 
 # Expor portas
 EXPOSE 8080
