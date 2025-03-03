@@ -9,6 +9,13 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "healthcheckPath": "/_stcore/health",
-    "healthcheckTimeout": 300
+    "healthcheckTimeout": 300,
+    "healthcheckInterval": 15,
+    "envs": [
+      {
+        "key": "PORT",
+        "value": "8501"
+      }
+    ]
   }
 }
