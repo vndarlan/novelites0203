@@ -26,9 +26,18 @@ RUN python -m playwright install chromium --with-deps
 # Copiar o resto do código
 COPY . .
 
+# Criar script de verificação do BD
+COPY db_check.py .
+
 # Tornar scripts executáveis
 RUN chmod +x entrypoint.sh
 RUN chmod +x health_check_server.py
+RUN chmod +x db_check.py
+RUN chmod +x health_server.py
+
+# Garantir que os diretórios necessários existam e tenham permissões
+RUN mkdir -p static/screenshots && \
+    chmod -R 755 static
 
 # Expor portas
 EXPOSE 8080

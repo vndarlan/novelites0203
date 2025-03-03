@@ -10,7 +10,7 @@
     "restartPolicyMaxRetries": 10,
     "healthcheckPath": "/health",
     "healthcheckPort": 5000,
-    "healthcheckTimeout": 60,
-    "healthcheckInterval": 30
+    "healthcheckTimeout": 120,
+    "healthcheckInterval": 60
   }
 }
