@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import time
+import glob
+import shutil
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pydantic import BaseModel, Field
@@ -12,6 +14,8 @@ import tempfile
 from db.database import get_db_session
 from db.models import Task, TaskHistory
 from utils.helpers import save_screenshot
+from utils.sensitive_data import sensitive_data_manager
+from utils.controller import controller
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -169,6 +173,14 @@ Você pode executar as seguintes ações:
 - extract_all_text(): Extrair todo o texto da página
 - upload_file(selector, file_path): Fazer upload de arquivo
 
+Funções personalizadas disponíveis:
+- debug_message(message): Exibe uma mensagem de depuração no console
+- ask_human(question): Pergunta ao usuário e retorna a resposta
+- upload_file(selector, file_path): Faz upload de um arquivo para um elemento na página
+- notify_user(message, type): Exibe uma notificação para o usuário
+- save_to_file(content, filename): Salva conteúdo em um arquivo
+- extract_tables(): Extrai tabelas da página atual
+
 Analise a tarefa, divida-a em etapas lógicas e execute-as sequencialmente. Se encontrar um obstáculo, tente contorná-lo ou explique por que não é possível continuar.
 
 INSTRUÇÕES PARA A TAREFA:
@@ -196,7 +208,7 @@ class ActionResult(BaseModel):
     extracted_content: Optional[str] = None
     error: Optional[str] = None
 
-async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browser_config: Dict) -> Dict[str, Any]:
+async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browser_config: Dict, sensitive_data: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Executa uma tarefa de agente usando LLM e Playwright"""
     logger.info(f"Iniciando tarefa {task_id}")
     
@@ -213,13 +225,28 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
         'sensitive_data': {}  # Para armazenar dados sensíveis
     }
     
-    # Verificar se há dados sensíveis nas instruções
-    # Isso pode ser expandido com base em parâmetros de configuração
-    sensitive_data = {}
+    # Processar dados sensíveis
+    if sensitive_data:
+        # Adicionar dados sensíveis ao gerenciador
+        sensitive_data_manager.add_sensitive_data(sensitive_data)
+        
+        # Mascarar a tarefa para proteger dados sensíveis
+        task_instructions = sensitive_data_manager.mask_prompt(task_instructions)
+        
+        # Adicionar instruções sobre dados sensíveis ao prompt
+        task_instructions += f"\n\n{sensitive_data_manager.get_placeholder_description()}"
     
     # Diretório temporário para arquivos
     temp_dir = tempfile.mkdtemp()
     logger.info(f"Diretório temporário criado: {temp_dir}")
+    
+    # Diretório para gravações
+    if browser_config.get('save_recording', False):
+        recording_path = browser_config.get('recording_path', 'static/recordings')
+        os.makedirs(recording_path, exist_ok=True)
+        recording_file = os.path.join(recording_path, f"{task_id}.webm")
+    else:
+        recording_file = None
     
     try:
         # Iniciar o Playwright
@@ -268,6 +295,12 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
             # Adicionar user agent se configurado
             if browser_context_config.user_agent:
                 context_options['user_agent'] = browser_context_config.user_agent
+                
+            # Adicionar gravação se configurado
+            if recording_file:
+                context_options['record_video_dir'] = os.path.dirname(recording_file)
+                context_options['record_video_size'] = browser_context_config.browser_window_size
+                logger.info(f"Gravando vídeo em: {recording_file}")
                 
             # Criar contexto e página
             context = await browser.new_context(**context_options)
@@ -360,10 +393,14 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
                     
                     # Verificar se o texto contém dados sensíveis
                     sensitive_text = text
-                    for key, value in sensitive_data.items():
-                        if key in task_instructions:
-                            # Substituir valor sensível pelo placeholder na resposta
-                            text = text.replace(value, key)
+                    if sensitive_data:
+                        # Desmascarar o texto (substituir placeholders por valores reais)
+                        for placeholder, value in sensitive_data.items():
+                            placeholder_pattern = f"[{placeholder}]"
+                            if placeholder_pattern in text:
+                                sensitive_text = text.replace(placeholder_pattern, value)
+                            elif placeholder == text:
+                                sensitive_text = value
                     
                     # Destacar elemento se configurado
                     if browser_context_config.highlight_elements:
@@ -382,9 +419,17 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
                     # Usar o texto original (possivelmente com dados sensíveis) para digitar
                     await current_page.fill(selector, sensitive_text)
                     
+                    # Retornar o texto mascarado para o log
+                    masked_text = text
+                    if sensitive_data:
+                        # Remover valores sensíveis do log
+                        for placeholder, value in sensitive_data.items():
+                            if value in text:
+                                masked_text = text.replace(value, f"[{placeholder}]")
+                    
                     return ActionResult(
                         success=True,
-                        extracted_content=f"Digitou '{text}' em {selector}"  # Texto com placeholders
+                        extracted_content=f"Digitou '{masked_text}' em {selector}"  # Texto com placeholders
                     )
                 except Exception as e:
                     error_msg = f"Erro ao digitar em {selector}: {str(e)}"
@@ -426,10 +471,11 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
                     
                     text = await current_page.text_content(selector)
                     
-                    # Substituir dados sensíveis por placeholders
-                    for key, value in sensitive_data.items():
-                        if value in text:
-                            text = text.replace(value, f"[{key}]")
+                    # Filtrar dados sensíveis
+                    if sensitive_data:
+                        for placeholder, value in sensitive_data.items():
+                            if value in text:
+                                text = text.replace(value, f"[{placeholder}]")
                     
                     return ActionResult(
                         success=True,
@@ -616,10 +662,9 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
                     if len(text) > max_chars:
                         text = text[:max_chars] + f"\n... (texto truncado, mostrando {max_chars} de {len(text)} caracteres)"
                     
-                    # Substituir dados sensíveis
-                    for key, value in sensitive_data.items():
-                        if value in text:
-                            text = text.replace(value, f"[{key}]")
+                    # Filtrar dados sensíveis
+                    if sensitive_data:
+                        text = sensitive_data_manager.filter_page_content(text)
                     
                     return ActionResult(
                         success=True,
@@ -806,6 +851,56 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
                                     error_msg = f"Erro ao executar {action_name}: {str(action_ex)}"
                                     result['errors'].append(error_msg)
                                     prompt += f"\n\nErro na ação {action_name}: {error_msg}"
+                            elif action_name in controller.actions:
+                                # Verificar se é uma ação do controller personalizado
+                                logger.info(f"Executando ação personalizada: {action_name}")
+                                
+                                # Preparar parâmetros
+                                action_params = {}
+                                if params_str.strip():
+                                    # Transformar string de parâmetros em dicionário
+                                    # Este é um método simples; em uma versão completa você usaria um parser mais robusto
+                                    import ast
+                                    try:
+                                        # Tentar avaliar como expressão Python
+                                        eval_str = f"dict({params_str})"
+                                        action_params = ast.literal_eval(eval_str)
+                                    except:
+                                        # Método mais simples: dividir por vírgula e por igual
+                                        for param in params_str.split(','):
+                                            if '=' in param:
+                                                key, value = param.split('=', 1)
+                                                action_params[key.strip()] = value.strip()
+                                
+                                # Desmascarar parâmetros se tiver dados sensíveis
+                                if sensitive_data:
+                                    for key, value in action_params.items():
+                                        if isinstance(value, str):
+                                            for placeholder, sensitive_value in sensitive_data.items():
+                                                placeholder_pattern = f"[{placeholder}]"
+                                                if placeholder_pattern in value:
+                                                    action_params[key] = value.replace(placeholder_pattern, sensitive_value)
+                                
+                                # Executar a ação personalizada
+                                browser_obj = {
+                                    'get_current_page': lambda: tabs[current_tab_index]
+                                }
+                                action_result = await controller.execute_action(action_name, action_params, browser_obj)
+                                
+                                # Adicionar resultado ao prompt
+                                prompt += f"\n\nAção personalizada: {action_name}({params_str})\nResultado: {action_result.extracted_content if action_result.success else action_result.error}"
+                                
+                                # Adicionar à lista de passos
+                                step_result['next_goal'] = f"{action_name}({params_str})"
+                                
+                                # Sair do loop de ações após a primeira ação
+                                break
+                            else:
+                                # Ação desconhecida
+                                error_msg = f"Ação desconhecida: {action_name}"
+                                result['errors'].append(error_msg)
+                                prompt += f"\n\nErro: {error_msg}. Por favor, use uma ação válida."
+                                continue
                     else:
                         # Se não houver ações claras, verificar se o agente concluiu a tarefa
                         completion_indicators = ['concluído', 'completo', 'finalizado', 'completada', 'terminada', 
@@ -841,6 +936,25 @@ async def run_agent_task(task_id: str, task_instructions: str, llm: Dict, browse
             if step_count >= max_steps and result['status'] == 'running':
                 result['status'] = 'finished'
                 result['output'] = "A tarefa atingiu o limite de passos. Avanço parcial registrado."
+            
+            # Ao final, quando for fechar o navegador, renomear o vídeo se necessário
+            if recording_file:
+                # Aguardar um pouco para garantir que o vídeo seja salvo
+                await asyncio.sleep(1)
+                
+                # Obter os arquivos de vídeo gerados
+                video_files = glob.glob(os.path.join(os.path.dirname(recording_file), "*.webm"))
+                
+                if video_files:
+                    # Ordenar por data de modificação (o mais recente primeiro)
+                    video_files.sort(key=os.path.getmtime, reverse=True)
+                    
+                    # Renomear o arquivo mais recente
+                    if os.path.exists(recording_file):
+                        os.remove(recording_file)
+                    
+                    shutil.move(video_files[0], recording_file)
+                    logger.info(f"Vídeo renomeado para: {recording_file}")
             
             # Fechar o navegador
             await context.close()

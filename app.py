@@ -9,6 +9,9 @@ import tempfile
 import json
 import threading
 import logging
+import glob
+import shutil
+from typing import Dict, Any, Optional
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -38,10 +41,51 @@ try:
     from db.models import Task, TaskHistory, ApiKey
     from utils.agent_runner import run_agent_task
     from utils.helpers import format_datetime, get_status_color, generate_unique_id, get_llm_models
+    from utils.sensitive_data import sensitive_data_manager
+    from utils.controller import controller, ActionResult
+    from utils.output_format import output_format_manager
     logger.info("Módulos internos importados com sucesso")
 except ImportError as e:
     logger.error(f"Erro ao importar módulos: {e}")
     st.error(f"Erro ao importar módulos: {e}")
+
+def delete_task(task_id):
+    """Deleta uma tarefa e seu histórico do banco de dados"""
+    logger.info(f"Tentando deletar tarefa {task_id}")
+    
+    try:
+        with get_db_session() as session:
+            # Buscar a tarefa (o relacionamento em cascata irá excluir o histórico automaticamente)
+            task = session.query(Task).filter(Task.id == task_id).first()
+            
+            if not task:
+                logger.warning(f"Tarefa {task_id} não encontrada para exclusão")
+                return False, "Tarefa não encontrada"
+            
+            # Excluir a tarefa
+            session.delete(task)
+            session.commit()
+            
+            # Tentar excluir screenshots e gravação
+            try:
+                # Remover screenshots
+                screenshot_pattern = f"static/screenshots/{task_id}_*.png"
+                for screenshot in glob.glob(screenshot_pattern):
+                    os.remove(screenshot)
+                
+                # Remover gravação
+                recording_path = f"static/recordings/{task_id}.webm"
+                if os.path.exists(recording_path):
+                    os.remove(recording_path)
+            except Exception as e:
+                logger.warning(f"Erro ao remover arquivos da tarefa {task_id}: {str(e)}")
+            
+            logger.info(f"Tarefa {task_id} deletada com sucesso")
+            return True, "Tarefa deletada com sucesso"
+    
+    except Exception as e:
+        logger.error(f"Erro ao deletar tarefa {task_id}: {str(e)}")
+        return False, f"Erro ao deletar tarefa: {str(e)}"
 
 # Inicialização de variáveis de sessão
 def init_session_state():
@@ -59,17 +103,36 @@ def init_session_state():
         if 'browser_config' not in st.session_state:
             # Carregar config do banco de dados ou usar padrão
             st.session_state.browser_config = {
-                'headless': True,  # Mudado para True para Railway
+                'headless': False,  # Mudado para False para visualizar o navegador
                 'disable_security': True,
                 'browser_window_width': 1280,
                 'browser_window_height': 1100,
                 'highlight_elements': True,
                 'chrome_instance_path': None,
+                'wait_for_network_idle': 3.0,
+                'minimum_wait_page_load_time': 0.5,
+                'maximum_wait_page_load_time': 5.0,
+                'max_steps': 15,
+                'full_page_screenshot': False,
+                'use_vision': True,
+                'save_recording': True,
+                'recording_path': 'static/recordings',
+                'show_browser': True
             }
         if 'task_running' not in st.session_state:
             st.session_state.task_running = False
         if 'task_result' not in st.session_state:
             st.session_state.task_result = None
+        if 'screenshot_index' not in st.session_state:
+            st.session_state.screenshot_index = 0
+        if 'confirm_delete_all' not in st.session_state:
+            st.session_state.confirm_delete_all = False
+        if 'delete_message' not in st.session_state:
+            st.session_state.delete_message = None
+        if 'sensitive_data_entries' not in st.session_state:
+            st.session_state.sensitive_data_entries = [("x_username", ""), ("x_password", "")]
+        if 'force_rerun_task' not in st.session_state:
+            st.session_state.force_rerun_task = False
         logger.info("Estado da sessão inicializado com sucesso")
     except Exception as e:
         logger.error(f"Erro ao inicializar estado da sessão: {e}")
@@ -241,7 +304,16 @@ def auth_page():
                 'browser_window_width': browser_window_width,
                 'browser_window_height': browser_window_height,
                 'highlight_elements': highlight_elements,
-                'chrome_instance_path': st.session_state.browser_config.get('chrome_instance_path')
+                'chrome_instance_path': st.session_state.browser_config.get('chrome_instance_path'),
+                'wait_for_network_idle': 3.0,
+                'minimum_wait_page_load_time': 0.5,
+                'maximum_wait_page_load_time': 5.0,
+                'max_steps': 15,
+                'full_page_screenshot': False,
+                'use_vision': True,
+                'save_recording': True,
+                'recording_path': 'static/recordings',
+                'show_browser': not headless
             }
             st.session_state.browser_config = browser_config
             
@@ -308,6 +380,105 @@ def create_task_page():
                 )
                 st.session_state.llm_model = selected_model
             
+            # Opções avançadas do navegador
+            with st.expander("🔧 Opções avançadas do navegador"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    show_browser = st.checkbox(
+                        "Mostrar navegador durante execução", 
+                        value=st.session_state.browser_config.get('show_browser', True),
+                        help="Se marcado, você verá o navegador em tempo real durante a execução da tarefa."
+                    )
+                    
+                    headless = not show_browser  # Inverso do show_browser
+                    
+                    save_recording = st.checkbox(
+                        "Salvar gravação da execução", 
+                        value=st.session_state.browser_config.get('save_recording', True),
+                        help="Se marcado, uma gravação da execução será salva e poderá ser visualizada depois."
+                    )
+                
+                with col2:
+                    max_steps = st.number_input(
+                        "Número máximo de passos", 
+                        min_value=5, 
+                        max_value=50, 
+                        value=st.session_state.browser_config.get('max_steps', 15),
+                        help="Limita o número máximo de ações que o agente pode executar."
+                    )
+                    
+                    highlight_elements = st.checkbox(
+                        "Destacar elementos interativos", 
+                        value=st.session_state.browser_config.get('highlight_elements', True),
+                        help="Destaca elementos quando o agente interage com eles."
+                    )
+                
+                # Atualizar configuração do navegador
+                browser_config = st.session_state.browser_config.copy()
+                browser_config.update({
+                    'headless': headless,
+                    'show_browser': show_browser,
+                    'save_recording': save_recording,
+                    'max_steps': max_steps,
+                    'highlight_elements': highlight_elements,
+                    'recording_path': 'static/recordings'
+                })
+                
+                # Atualizar sessão apenas quando necessário
+                if browser_config != st.session_state.browser_config:
+                    st.session_state.browser_config = browser_config
+
+            # Dados sensíveis
+            with st.expander("🔒 Dados Sensíveis"):
+                st.markdown("""
+                Adicione dados sensíveis que o agente pode precisar usar (como senhas, tokens, etc).
+                O agente verá apenas os nomes dos placeholders, não os valores reais.
+                """)
+                
+                # Função para adicionar nova entrada
+                def add_sensitive_entry():
+                    st.session_state.sensitive_data_entries.append((f"x_data_{len(st.session_state.sensitive_data_entries)+1}", ""))
+                
+                # Função para remover entrada
+                def remove_sensitive_entry(index):
+                    st.session_state.sensitive_data_entries.pop(index)
+                
+                # Mostrar entradas existentes
+                for i, (placeholder, value) in enumerate(st.session_state.sensitive_data_entries):
+                    col1, col2, col3 = st.columns([2, 3, 1])
+                    with col1:
+                        new_placeholder = st.text_input(f"Nome do placeholder {i+1}", placeholder, key=f"placeholder_{i}")
+                    with col2:
+                        new_value = st.text_input(f"Valor sensível {i+1}", value, type="password", key=f"value_{i}")
+                    with col3:
+                        if st.button("🗑️", key=f"delete_{i}"):
+                            remove_sensitive_entry(i)
+                            st.experimental_rerun()
+                    
+                    # Atualizar valores
+                    st.session_state.sensitive_data_entries[i] = (new_placeholder, new_value)
+                
+                # Botão para adicionar nova entrada
+                if st.button("➕ Adicionar Dado Sensível"):
+                    add_sensitive_entry()
+                    st.experimental_rerun()
+                
+                # Converter entradas para dicionário
+                sensitive_data = {
+                    placeholder: value 
+                    for placeholder, value in st.session_state.sensitive_data_entries 
+                    if placeholder and value
+                }
+                
+                # Mostrar como usar na tarefa
+                if sensitive_data:
+                    st.markdown("### Como usar na tarefa:")
+                    examples = []
+                    for placeholder in sensitive_data.keys():
+                        examples.append(f"- Use **{placeholder}** para o valor sensível (ex: 'Faça login com {placeholder}')")
+                    st.markdown("\n".join(examples))
+                    
             # Verificar se a chave API está configurada
             api_key = api_keys.get(llm_provider, '')
             azure_endpoint = api_keys.get('azure_endpoint', '')
@@ -380,10 +551,20 @@ def create_task_page():
         st.error(f"Erro ao carregar página de criação de tarefas: {e}")
 
 def task_list_page():
-    """Página que lista todas as tarefas - versão simplificada"""
+    """Página que lista todas as tarefas com opção de exclusão"""
     try:
         logger.info("Carregando página de lista de tarefas")
         st.title("📋 Minhas Tarefas")
+        
+        # Verificar se há mensagem de confirmação para exibir
+        if 'delete_message' in st.session_state:
+            message_type, message = st.session_state.delete_message
+            if message_type:
+                st.success(message)
+            else:
+                st.error(message)
+            # Limpar a mensagem após exibir
+            del st.session_state.delete_message
         
         try:
             # Obter tarefas do banco de dados
@@ -406,7 +587,38 @@ def task_list_page():
                 st.info("Você ainda não possui tarefas. Crie uma nova na aba 'Criar Tarefa'.")
                 return
             
-            # Exibir lista simples de tarefas
+            # Botão para deletar todas as tarefas
+            if st.button("🗑️ Deletar Todas as Tarefas", type="secondary"):
+                st.session_state.confirm_delete_all = True
+                
+            # Confirmação para deletar todas
+            if st.session_state.get('confirm_delete_all', False):
+                st.warning("⚠️ Tem certeza que deseja deletar TODAS as tarefas? Esta ação não pode ser desfeita!")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Sim, deletar tudo"):
+                        success_count = 0
+                        total_tasks = len(task_dicts)
+                        
+                        for task in task_dicts:
+                            success, _ = delete_task(task["id"])
+                            if success:
+                                success_count += 1
+                        
+                        if success_count == total_tasks:
+                            st.session_state.delete_message = (True, f"Todas as {total_tasks} tarefas foram deletadas com sucesso!")
+                        else:
+                            st.session_state.delete_message = (False, f"Foram deletadas {success_count} de {total_tasks} tarefas.")
+                        
+                        st.session_state.confirm_delete_all = False
+                        st.experimental_rerun()
+                
+                with col2:
+                    if st.button("❌ Cancelar"):
+                        st.session_state.confirm_delete_all = False
+                        st.experimental_rerun()
+            
+            # Exibir lista de tarefas
             st.write("### Lista de Tarefas")
             
             for i, task in enumerate(task_dicts):
@@ -415,14 +627,32 @@ def task_list_page():
                 task_status = task["status"]
                 task_date = format_datetime(task["created_at"])
                 
-                col1, col2 = st.columns([3, 1])
+                col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
                     st.write(f"**{i+1}. {task_desc}** (ID: `{task_id}`)")
                     st.write(f"Status: {task_status} | Criado: {task_date}")
                 with col2:
-                    if st.button(f"Ver Detalhes", key=f"view_{task_id}"):
+                    if st.button(f"👁️ Ver Detalhes", key=f"view_{task_id}"):
                         st.session_state.current_task = task_id
                         st.experimental_rerun()
+                with col3:
+                    if st.button(f"🗑️ Deletar", key=f"delete_{task_id}"):
+                        st.session_state[f"confirm_delete_{task_id}"] = True
+                
+                # Mostrar confirmação de exclusão se necessário
+                if st.session_state.get(f"confirm_delete_{task_id}", False):
+                    st.warning(f"⚠️ Tem certeza que deseja deletar esta tarefa? Esta ação não pode ser desfeita!")
+                    confirm_col1, confirm_col2 = st.columns(2)
+                    with confirm_col1:
+                        if st.button(f"✅ Sim", key=f"confirm_yes_{task_id}"):
+                            success, message = delete_task(task_id)
+                            st.session_state.delete_message = (success, message)
+                            del st.session_state[f"confirm_delete_{task_id}"]
+                            st.experimental_rerun()
+                    with confirm_col2:
+                        if st.button(f"❌ Não", key=f"confirm_no_{task_id}"):
+                            del st.session_state[f"confirm_delete_{task_id}"]
+                            st.experimental_rerun()
                 
                 st.markdown("---")
         
@@ -454,14 +684,35 @@ def execute_task_thread(task_id):
 async def execute_task_async(task_id):
     """Executa uma tarefa específica assincronamente"""
     logger.info(f"Executando tarefa {task_id} assincronamente")
-    # Obter dados da tarefa e chaves da API do banco de dados
+    
+    # Antes de iniciar qualquer coisa, verificar se a tarefa existe e o status atual
     with get_db_session() as session:
         task = session.query(Task).filter(Task.id == task_id).first()
-        api_keys = {key.provider: key.api_key for key in session.query(ApiKey).all()}
-    
-    if not task:
-        logger.error(f"Tarefa {task_id} não encontrada")
-        return {"error": "Tarefa não encontrada"}
+        
+        if not task:
+            logger.error(f"Tarefa {task_id} não encontrada")
+            return {"error": "Tarefa não encontrada"}
+        
+        # Se a tarefa já estiver em execução, finalizada ou falha, verificar tempo
+        if task.status in ['running', 'finished', 'failed']:
+            # Verificar se está em "running" por mais de 30 minutos - provável travamento
+            if task.status == 'running' and task.created_at:
+                time_diff = datetime.now() - task.created_at
+                
+                # Se passaram mais de 30 minutos, podemos assumir que houve um problema
+                if time_diff.total_seconds() > 1800:  # 30 minutos em segundos
+                    logger.warning(f"Tarefa {task_id} está em execução por mais de 30 minutos. Resetando status.")
+                    task.status = 'created'  # Reset para permitir nova execução
+                    session.commit()
+                else:
+                    # Está em execução por um tempo razoável, não devemos executar novamente
+                    logger.warning(f"Tarefa {task_id} já está em execução.")
+                    return {"error": "Tarefa já está em execução"}
+            elif task.status in ['finished', 'failed']:
+                # Verificar se o usuário quer reexecutar explicitamente
+                if not st.session_state.get('force_rerun_task', False):
+                    logger.info(f"Tarefa {task_id} já foi executada com status {task.status}.")
+                    return {"error": f"Tarefa já foi executada com status {task.status}. Use 'Executar Novamente' para forçar reexecução."}
     
     # Atualizar status para 'running'
     with get_db_session() as session:
@@ -470,6 +721,9 @@ async def execute_task_async(task_id):
         session.commit()
     
     # Preparar API Key para o modelo selecionado
+    with get_db_session() as session:
+        api_keys = {key.provider: key.api_key for key in session.query(ApiKey).all()}
+        
     if task.llm_provider == 'azure':
         api_key = api_keys.get('azure', '')
         endpoint = api_keys.get('azure_endpoint', '')
@@ -487,44 +741,91 @@ async def execute_task_async(task_id):
             'api_key': api_key
         }
     
-    logger.info(f"Executando agente para tarefa {task_id}")
-    # Executar o agente
-    result = await run_agent_task(
-        task_id=task_id,
-        task_instructions=task.task,
-        llm=llm_info,
-        browser_config=st.session_state.browser_config
-    )
+    # Obter dados sensíveis da sessão
+    sensitive_data = {}
+    if 'sensitive_data_entries' in st.session_state:
+        sensitive_data = {
+            placeholder: value 
+            for placeholder, value in st.session_state.sensitive_data_entries 
+            if placeholder and value
+        }
     
-    # Atualizar o status da tarefa no banco de dados
-    with get_db_session() as session:
-        task = session.query(Task).filter(Task.id == task_id).first()
-        task.status = result['status']
-        task.finished_at = datetime.now() if result['status'] in ['finished', 'failed'] else None
-        task.output = result.get('output', '')
+    try:
+        logger.info(f"Executando agente para tarefa {task_id}")
+        # Executar o agente
+        result = await run_agent_task(
+            task_id=task_id,
+            task_instructions=task.task,
+            llm=llm_info,
+            browser_config=st.session_state.browser_config,
+            sensitive_data=sensitive_data
+        )
         
-        # Criar ou atualizar o histórico da tarefa
-        task_history = session.query(TaskHistory).filter(TaskHistory.task_id == task_id).first()
+        # Atualizar o status da tarefa no banco de dados
+        with get_db_session() as session:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            
+            if not task:
+                logger.error(f"Tarefa {task_id} não encontrada após execução")
+                return {"error": "Tarefa não encontrada após execução"}
+                
+            # Definir status correto
+            task.status = result.get('status', 'unknown')
+            if task.status not in ['created', 'running', 'finished', 'failed']:
+                task.status = 'finished' if not result.get('errors') else 'failed'
+                
+            task.finished_at = datetime.now()
+            task.output = result.get('output', '')
+            
+            # Criar ou atualizar o histórico da tarefa
+            task_history = session.query(TaskHistory).filter(TaskHistory.task_id == task_id).first()
+            
+            if task_history:
+                task_history.steps = json.dumps(result.get('steps', []))
+                task_history.urls = json.dumps(result.get('urls', []))
+                task_history.screenshots = json.dumps(result.get('screenshots', []))
+                task_history.errors = json.dumps(result.get('errors', []))
+            else:
+                task_history = TaskHistory(
+                    task_id=task_id,
+                    steps=json.dumps(result.get('steps', [])),
+                    urls=json.dumps(result.get('urls', [])),
+                    screenshots=json.dumps(result.get('screenshots', [])),
+                    errors=json.dumps(result.get('errors', []))
+                )
+                session.add(task_history)
+            
+            # Calcular duração total
+            if task.created_at and task.finished_at:
+                duration_seconds = (task.finished_at - task.created_at).total_seconds()
+                task_history.duration = str(int(duration_seconds))
+            
+            session.commit()
         
-        if task_history:
-            task_history.steps = json.dumps(result.get('steps', []))
-            task_history.urls = json.dumps(result.get('urls', []))
-            task_history.screenshots = json.dumps(result.get('screenshots', []))
-            task_history.errors = json.dumps(result.get('errors', []))
-        else:
-            task_history = TaskHistory(
-                task_id=task_id,
-                steps=json.dumps(result.get('steps', [])),
-                urls=json.dumps(result.get('urls', [])),
-                screenshots=json.dumps(result.get('screenshots', [])),
-                errors=json.dumps(result.get('errors', []))
-            )
-            session.add(task_history)
+        # Limpar flag de reexecução forçada se existir
+        if 'force_rerun_task' in st.session_state:
+            del st.session_state['force_rerun_task']
         
-        session.commit()
-    
-    logger.info(f"Tarefa {task_id} concluída com status: {result['status']}")
-    return result
+        logger.info(f"Tarefa {task_id} concluída com status: {result.get('status', 'unknown')}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erro durante execução da tarefa {task_id}: {str(e)}")
+        
+        # Atualizar status para falha em caso de exceção
+        with get_db_session() as session:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.status = 'failed'
+                task.finished_at = datetime.now()
+                task.output = f"Erro na execução: {str(e)}"
+                session.commit()
+        
+        return {
+            "status": "failed",
+            "error": str(e),
+            "errors": [str(e)]
+        }
 
 def task_detail_page():
     """Página de detalhes da tarefa atual"""
@@ -587,16 +888,41 @@ def task_detail_page():
         with col2:
             if status == 'running':
                 st.info("Tarefa em execução. Aguarde a conclusão ou atualize a página para ver o progresso.")
+                if st.button("🔄 Atualizar Status", key="refresh_status"):
+                    st.experimental_rerun()
             elif status == 'created':
-                if st.button("▶️ Executar Tarefa", key="run_task", use_container_width=True):
+                run_col1, run_col2 = st.columns(2)
+                with run_col1:
+                    if st.button("▶️ Executar Tarefa", key="run_task", use_container_width=True):
+                        if not st.session_state.task_running:
+                            st.session_state.task_running = True
+                            logger.info(f"Iniciando execução da tarefa {task_id}")
+                            # Iniciar thread para executar a tarefa
+                            thread = threading.Thread(target=execute_task_thread, args=(task_id,))
+                            thread.daemon = True
+                            thread.start()
+                            st.info("Iniciando execução da tarefa...")
+                            st.experimental_rerun()
+                with run_col2:
+                    headless = st.checkbox("Executar em modo headless", value=st.session_state.browser_config.get('headless', False),
+                                    help="Se marcado, o navegador não será visível durante a execução")
+                    if headless != st.session_state.browser_config.get('headless', False):
+                        # Atualizar configuração
+                        browser_config = st.session_state.browser_config.copy()
+                        browser_config['headless'] = headless
+                        browser_config['show_browser'] = not headless
+                        st.session_state.browser_config = browser_config
+            elif status in ['finished', 'failed']:
+                if st.button("🔄 Executar Novamente", key="rerun_task", use_container_width=True):
+                    st.session_state['force_rerun_task'] = True
                     if not st.session_state.task_running:
                         st.session_state.task_running = True
-                        logger.info(f"Iniciando execução da tarefa {task_id}")
+                        logger.info(f"Reexecutando tarefa {task_id}")
                         # Iniciar thread para executar a tarefa
                         thread = threading.Thread(target=execute_task_thread, args=(task_id,))
                         thread.daemon = True
                         thread.start()
-                        st.info("Iniciando execução da tarefa...")
+                        st.info("Reiniciando execução da tarefa...")
                         st.experimental_rerun()
         
         # Detalhes da tarefa
@@ -617,7 +943,33 @@ def task_detail_page():
         # Se a tarefa estiver em execução, mostrar informações de progresso
         if st.session_state.task_running:
             st.info("A tarefa está sendo executada em segundo plano... Isso pode levar alguns minutos.")
-            if st.button("Atualizar Status"):
+            progress_placeholder = st.empty()
+            
+            # Verificar estado atual
+            with get_db_session() as session:
+                current_task = session.query(Task).filter(Task.id == task_id).first()
+                current_status = current_task.status if current_task else "unknown"
+                
+                # Verificar histórico para obter informações atuais
+                task_history = session.query(TaskHistory).filter(TaskHistory.task_id == task_id).first()
+                if task_history:
+                    steps = json.loads(task_history.steps) if task_history.steps else []
+                    urls = json.loads(task_history.urls) if task_history.urls else []
+                    screenshots = json.loads(task_history.screenshots) if task_history.screenshots else []
+                    
+                    # Mostrar progresso atual
+                    with progress_placeholder.container():
+                        st.write(f"Status atual: **{current_status}**")
+                        st.write(f"Passos executados: **{len(steps)}**")
+                        st.write(f"URLs visitadas: **{len(urls)}**")
+                        
+                        # Mostrar último screenshot se disponível
+                        if screenshots:
+                            last_screenshot = screenshots[-1]
+                            if os.path.exists(last_screenshot):
+                                st.image(last_screenshot, caption="Última captura de tela")
+            
+            if st.button("Atualizar Progresso"):
                 st.experimental_rerun()
         
         # Se o resultado da tarefa estiver disponível na sessão, exibi-lo
@@ -631,6 +983,12 @@ def task_detail_page():
         # Se o status for 'created' e a tarefa não estiver em execução, propor execução
         if status == 'created' and not st.session_state.task_running:
             st.info("Esta tarefa está aguardando execução. Clique em 'Executar Tarefa' para iniciá-la.")
+        
+        # Verificar se há gravação para esta tarefa
+        recording_path = os.path.join(st.session_state.browser_config.get('recording_path', 'static/recordings'), f"{task_id}.webm")
+        if os.path.exists(recording_path):
+            st.markdown("### 🎬 Gravação da Execução")
+            st.video(recording_path)
         
         # Exibir resultados se a tarefa estiver concluída e houver dados no histórico
         if history_data and status in ['finished', 'failed']:
@@ -660,15 +1018,36 @@ def task_detail_page():
                 for url in urls:
                     st.markdown(f"- {url}")
             
-            # Mostrar screenshots se disponíveis
-            if screenshots:
-                st.markdown("### Capturas de Tela")
+            # Mostrar screenshots se disponíveis e não existir gravação
+            if screenshots and not os.path.exists(recording_path):
+                st.markdown("### 📸 Capturas de Tela")
                 
-                for i, screenshot in enumerate(screenshots):
-                    if os.path.exists(screenshot):
-                        st.image(screenshot, caption=f"Captura {i+1}")
-                    else:
-                        st.warning(f"Imagem não encontrada: {screenshot}")
+                # Exibir slideshow com os screenshots
+                screenshot_index = st.session_state.get('screenshot_index', 0)
+                total_screenshots = len(screenshots)
+                
+                if total_screenshots > 0:
+                    # Navegação do slideshow
+                    col1, col2, col3 = st.columns([1, 10, 1])
+                    
+                    with col1:
+                        if st.button("◀️", key="prev_screenshot", disabled=screenshot_index <= 0):
+                            st.session_state.screenshot_index = max(0, screenshot_index - 1)
+                            st.experimental_rerun()
+                    
+                    with col2:
+                        # Exibir screenshot atual
+                        if 0 <= screenshot_index < total_screenshots:
+                            current_screenshot = screenshots[screenshot_index]
+                            if os.path.exists(current_screenshot):
+                                st.image(current_screenshot, caption=f"Captura {screenshot_index + 1} de {total_screenshots}")
+                            else:
+                                st.warning(f"Imagem não encontrada: {current_screenshot}")
+                    
+                    with col3:
+                        if st.button("▶️", key="next_screenshot", disabled=screenshot_index >= total_screenshots - 1):
+                            st.session_state.screenshot_index = min(total_screenshots - 1, screenshot_index + 1)
+                            st.experimental_rerun()
             
             # Mostrar resultado final
             if task_data['output']:

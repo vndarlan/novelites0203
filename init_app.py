@@ -10,11 +10,14 @@ logger = logging.getLogger(__name__)
 def init_directories():
     """Inicializa os diretórios necessários para o funcionamento do aplicativo"""
     directories = [
-        "db",
-        "utils",
-        "static",
-        "static/screenshots"
-    ]
+    "db",
+    "utils",
+    "static",
+    "static/screenshots",
+    "static/recordings",  # Nova pasta para gravações
+    "downloads",          # Pasta para arquivos salvos pelo agente
+    "temp_uploads"        # Pasta para uploads temporários
+]
     
     for directory in directories:
         if not os.path.exists(directory):
@@ -54,7 +57,7 @@ def init_default_config():
         from db.models import ApiKey
         
         default_browser_config = {
-            'headless': True,
+            'headless': False,  # Alterado para False por padrão para visualizar o navegador
             'disable_security': True,
             'browser_window_width': 1280,
             'browser_window_height': 1100,
@@ -66,8 +69,12 @@ def init_default_config():
             'max_steps': 15,
             'full_page_screenshot': False,
             'use_vision': True,
-            'allowed_domains': []
+            'allowed_domains': [],
+            'save_recording': True,  # Nova opção para gravar a execução
+            'recording_path': 'static/recordings',  # Caminho para salvar as gravações
+            'show_browser': True  # Nova opção para mostrar o navegador durante a execução
         }
+
         
         with get_db_session() as session:
             # Verificar se já existe configuração
