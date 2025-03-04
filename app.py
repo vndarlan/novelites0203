@@ -17,6 +17,26 @@ from typing import Dict, Any, Optional
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Configurar logs para também serem mostrados na interface
+class StreamlitHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.logs = []
+        
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.logs.append((record.levelname, log_entry))
+        # Manter apenas os últimos 100 logs para evitar sobrecarga de memória
+        if len(self.logs) > 100:
+            self.logs.pop(0)
+
+# Criar handler para logs do Streamlit
+streamlit_handler = StreamlitHandler()
+streamlit_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+streamlit_handler.setFormatter(formatter)
+logger.addHandler(streamlit_handler)
+
 logger.info("Iniciando app.py")
 
 try:
@@ -48,6 +68,33 @@ try:
 except ImportError as e:
     logger.error(f"Erro ao importar módulos: {e}")
     st.error(f"Erro ao importar módulos: {e}")
+
+async def test_browser_visibility():
+    """Testa se o navegador pode ser iniciado e é visível"""
+    from playwright.async_api import async_playwright
+    
+    try:
+        async with async_playwright() as p:
+            # Iniciar navegador em modo não-headless
+            browser = await p.chromium.launch(headless=False)
+            
+            # Criar página de teste
+            context = await browser.new_context()
+            page = await context.new_page()
+            
+            # Navegar para uma página de teste
+            await page.goto("https://example.com")
+            
+            # Esperar um pouco para visualização
+            await asyncio.sleep(3)
+            
+            # Fechar navegador
+            await context.close()
+            await browser.close()
+            
+            return True, "Navegador iniciado com sucesso e deve estar visível"
+    except Exception as e:
+        return False, f"Erro ao iniciar navegador: {str(e)}"
 
 def delete_task(task_id):
     """Deleta uma tarefa e seu histórico do banco de dados"""
@@ -418,7 +465,7 @@ def create_task_page():
                 browser_config = st.session_state.browser_config.copy()
                 browser_config.update({
                     'headless': headless,
-                    'show_browser': show_browser,
+                    'show_browser': not headless,  # Sempre o oposto de headless
                     'save_recording': save_recording,
                     'max_steps': max_steps,
                     'highlight_elements': highlight_elements,
@@ -478,6 +525,21 @@ def create_task_page():
                     for placeholder in sensitive_data.keys():
                         examples.append(f"- Use **{placeholder}** para o valor sensível (ex: 'Faça login com {placeholder}')")
                     st.markdown("\n".join(examples))
+            
+            # Ferramentas de diagnóstico
+            with st.expander("🔧 Ferramentas de Diagnóstico"):
+                st.info("Se estiver com problemas para visualizar o navegador, use esta ferramenta para testar.")
+                
+                if st.button("Testar Visualização do Navegador"):
+                    with st.spinner("Iniciando navegador de teste..."):
+                        success, message = asyncio.run(test_browser_visibility())
+                        
+                        if success:
+                            st.success(message)
+                            st.info("Se você não viu um navegador abrir, pode haver problemas com sua configuração.")
+                        else:
+                            st.error(message)
+                            st.error("Há um problema que impede o navegador de ser exibido. Verifique suas configurações.")
                     
             # Verificar se a chave API está configurada
             api_key = api_keys.get(llm_provider, '')
@@ -557,12 +619,17 @@ def task_list_page():
         st.title("📋 Minhas Tarefas")
         
         # Verificar se há mensagem de confirmação para exibir
-        if 'delete_message' in st.session_state:
-            message_type, message = st.session_state.delete_message
-            if message_type:
-                st.success(message)
-            else:
-                st.error(message)
+        if 'delete_message' in st.session_state and st.session_state.delete_message is not None:
+            try:
+                message_type, message = st.session_state.delete_message
+                if message_type:
+                    st.success(message)
+                else:
+                    st.error(message)
+            except (TypeError, ValueError):
+                # Se houver erro ao desempacotar, exibir a mensagem diretamente
+                st.warning(str(st.session_state.delete_message))
+            
             # Limpar a mensagem após exibir
             del st.session_state.delete_message
         
@@ -667,10 +734,21 @@ def task_list_page():
 def execute_task_thread(task_id):
     """Executa uma tarefa em uma thread separada"""
     logger.info(f"Iniciando thread para executar tarefa {task_id}")
+    
+    # Adicionar flag para indicar que o navegador deve estar visível
+    st.session_state.browser_should_be_visible = not st.session_state.browser_config.get('headless', False)
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
+        # Logar configurações do navegador para debug
+        logger.info(f"Configurações do navegador para tarefa {task_id}:")
+        logger.info(f"- headless: {st.session_state.browser_config.get('headless', False)}")
+        logger.info(f"- show_browser: {st.session_state.browser_config.get('show_browser', True)}")
+        logger.info(f"- window size: {st.session_state.browser_config.get('browser_window_width', 1280)}x{st.session_state.browser_config.get('browser_window_height', 1100)}")
+        
+        # Executar a tarefa
         result = loop.run_until_complete(execute_task_async(task_id))
         st.session_state.task_result = result
         logger.info(f"Tarefa {task_id} executada com sucesso")
@@ -679,6 +757,9 @@ def execute_task_thread(task_id):
         st.session_state.task_result = {"error": str(e)}
     finally:
         st.session_state.task_running = False
+        # Remover flag de visibilidade do navegador
+        if 'browser_should_be_visible' in st.session_state:
+            del st.session_state.browser_should_be_visible
         loop.close()
 
 async def execute_task_async(task_id):
@@ -750,6 +831,13 @@ async def execute_task_async(task_id):
             if placeholder and value
         }
     
+    # Forçar visualização se solicitado
+    browser_config = st.session_state.browser_config.copy()
+    if not browser_config.get('headless', False) or browser_config.get('show_browser', True):
+        browser_config['headless'] = False
+        browser_config['show_browser'] = True
+        logger.info("Configurado para mostrar o navegador durante a execução")
+    
     try:
         logger.info(f"Executando agente para tarefa {task_id}")
         # Executar o agente
@@ -757,7 +845,7 @@ async def execute_task_async(task_id):
             task_id=task_id,
             task_instructions=task.task,
             llm=llm_info,
-            browser_config=st.session_state.browser_config,
+            browser_config=browser_config,
             sensitive_data=sensitive_data
         )
         
@@ -943,6 +1031,11 @@ def task_detail_page():
         # Se a tarefa estiver em execução, mostrar informações de progresso
         if st.session_state.task_running:
             st.info("A tarefa está sendo executada em segundo plano... Isso pode levar alguns minutos.")
+            
+            if st.session_state.get('browser_should_be_visible', False):
+                st.warning("⚠️ Um navegador deve estar visível em sua tela agora! Se você não o vê, pode haver um problema com a configuração.")
+                st.info("Dicas de solução: verifique se você está em um ambiente com interface gráfica, se não há bloqueio pelo sistema operacional, ou se o navegador está aberto fora da área visível da tela.")
+            
             progress_placeholder = st.empty()
             
             # Verificar estado atual
@@ -989,6 +1082,24 @@ def task_detail_page():
         if os.path.exists(recording_path):
             st.markdown("### 🎬 Gravação da Execução")
             st.video(recording_path)
+        
+        # Logs para depuração
+        with st.expander("🔍 Logs de Depuração"):
+            if 'show_logs' not in st.session_state:
+                st.session_state.show_logs = False
+                
+            st.toggle("Mostrar logs", key="show_logs")
+            
+            if st.session_state.show_logs:
+                for level, entry in streamlit_handler.logs:
+                    if level == "ERROR":
+                        st.error(entry)
+                    elif level == "WARNING":
+                        st.warning(entry)
+                    elif level == "INFO":
+                        st.info(entry)
+                    else:
+                        st.text(entry)
         
         # Exibir resultados se a tarefa estiver concluída e houver dados no histórico
         if history_data and status in ['finished', 'failed']:
